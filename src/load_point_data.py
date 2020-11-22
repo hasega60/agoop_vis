@@ -8,6 +8,23 @@ from datetime import datetime
 import math
 import h3
 
+data_dir = "../data"
+output_dir = "../result"
+
+city = "tsukuba"
+
+start_hour = 6
+end_hour = 24
+max_speed = 150
+
+city_dict = {
+    "tsukuba": 8220,
+    "tsuchiura": 8203,
+}
+
+meshlevel = 3 #集計するメッシュレベル
+
+
 semiMajorAxis = 6378137.0  # 赤道半径
 flattening = 1 / 298.257223563  # 扁平率
 e_2 = flattening * (2 - flattening)
@@ -130,21 +147,6 @@ def output_trip_csv(trip_feature_list:[], user_cols_dict={}, path="trips.csv"):
     df_out.to_csv(path, index=False)
 
 if __name__ == '__main__':
-
-    data_dir = "../data"
-    output_dir= "../result"
-
-    city = "tsukuba"
-
-    start_hour=6
-    end_hour=24
-    max_speed=150
-
-    city_dict = {
-        "tsukuba": 8220,
-        "tsuchiura": 8203,
-    }
-
     try:
         # 市町村，記録時間をもとにデータ抽出
         df_all = pd.read_csv(f"{data_dir}/test_08.csv")
@@ -183,7 +185,7 @@ if __name__ == '__main__':
         df_od_grouping = df_od[["dailyid","lon_from", "lat_from","lon_to", "lat_to","hour"]]
 
         # mesh集計
-        meshlevel = 3
+
         def meshcode_from(row):
             return ju.to_meshcode(row["lat_from"], row["lon_from"], meshlevel)
 
