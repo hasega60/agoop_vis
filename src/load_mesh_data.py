@@ -1,25 +1,46 @@
 import pandas as pd
-import psycopg2
 import jismesh.utils as ju
-import numpy as np
-from geojson import Point, LineString, Feature, FeatureCollection
 from tqdm import tqdm
-from datetime import datetime
-import math
-import h3
 
 data_dir = "../data/mesh"
 output_dir = "../result/mesh"
-mesh_level = 4
+mesh_level = 3
 mesh_level_digit = [4,6,8,9,11,12]
+#フィルタ対象メッシュ（一次メッシュ）
+filter_mesh=[5339,5340,5439,5440]
+
+output_hour_agg = False # 時間帯別集計結果を出力するか
+
+
+def add_mesh_latlon_col(df:pd.DataFrame, mesh_col_index=0):
+    #TODO 11桁のメッシュ番号の場合は独自実装が必要 4次メッシュを5等分したもの 10桁目:緯度3/3600，11桁：軽度4.5/3600
+    out_list, lat_list, lon_list=[],[],[]
+    for v in tqdm(df.values):
+        try:
+            # meshcodeに規格外のものが入っているケースがあるので，それは取り除く
+            coords=ju.to_meshpoint(v[mesh_col_index], 0.5, 0.5)
+            lat_list.append(coords[0])
+            lon_list.append(coords[1])
+            out_list.append(v)
+        except:
+            continue
+
+    print(f"true mesh code:{len(out_list)} / {len(df)}")
+
+    df_out = pd.DataFrame(out_list, columns=df.columns)
+    df_out["lat"] = lat_list
+    df_out["lon"] = lon_list
+    return df_out
 
 if __name__ == '__main__':
+    df_all = pd.read_csv(f"{data_dir}/MDP_20191003.csv")
+    df_all["mesh_code"] = df_all["meshid"].apply(lambda x: int(str(x)[:mesh_level_digit[mesh_level-1]]))
+    df_all["mesh1"] = df_all["meshid"].apply(lambda x: int(str(x)[:mesh_level_digit[0]]))
+    #一次メッシュでフィルタ
+    df_all = df_all[df_all["mesh1"].isin(filter_mesh)]
 
-    try:
-        df_all = pd.read_csv(f"{data_dir}/MDP_20191003.csv")
-        df_all["mesh_code"] = df_all["meshid"].apply(lambda x: int(str(x)[:mesh_level_digit[mesh_level-1]]))
-
-        # mesh, 時間帯単位で集計
+    # mesh, 時間帯単位で集計----------------------------------
+    if output_hour_agg:
         df_hour = df_all[df_all["hour"] != "day"]
         # 時間でソート
         df_time = df_hour[["year", "month", "day", "hour"]]
@@ -29,33 +50,26 @@ if __name__ == '__main__':
 
         df_hour_group=df_hour[["mesh_code","hour","population"]]
         df_group = df_hour_group.groupby(["mesh_code", "hour"], as_index=False).sum()
-        df_group['lat'] = df_group['mesh_code'].apply(lambda x :ju.to_meshpoint(x, 0.5, 0.5)[0])
-        df_group['lon'] = df_group['mesh_code'].apply(lambda x: ju.to_meshpoint(x, 0.5, 0.5)[1])
-        df_group.to_csv(f"{output_dir}/trip_end_mesh{mesh_level}_hour.csv", index=False)
 
-        # mesh, dayflag(平日休日)で集計
-        df_day = df_all[(df_all["hour"] == "day") & ((df_all["dayflag"] == 0)|(df_all["dayflag"] == 1))]
-        df_day_group=df_day[["mesh_code", "dayflag", "population"]]
-        df_group = df_day_group.groupby(["mesh_code", "dayflag"], as_index=False).sum()
+        # meshcodeに規格外のものが入っているケースがあるので，それは取り除く
+        df_out=add_mesh_latlon_col(df_group, mesh_col_index=0)
 
+        path = f"{output_dir}/trip_end_mesh{mesh_level}_hour.csv"
+        df_out.to_csv(path, index=False)
+        print(f"export poplation per mesh-hour:{path}")
 
-        df_weekend = df_group[df_group["dayflag"]==0]
-        df_weekday = df_group[df_group["dayflag"]==1]
-        df_mesh_daytype=pd.merge(df_weekday, df_weekend, on="mesh_code", how="outer").fillna(0)
+    # mesh, 日付で集計（）----------------------------------
+    df_day = df_all[(df_all["hour"] == "day")]
+    df_day_group=df_day[["mesh_code","population"]]
+    df_group = df_day_group.groupby(["mesh_code"], as_index=False).sum()
+    #df_weekend = df_group[df_group["dayflag"]==0]
+    #df_weekday = df_group[df_group["dayflag"]==1]
+    #df_mesh_daytype=pd.merge(df_weekday, df_weekend, on="mesh_code", how="outer").fillna(0)
 
+    # meshcodeに規格外のものが入っているケースがあるので，それは取り除く
+    df_mesh_daytype_out = add_mesh_latlon_col(df_group, mesh_col_index=0)
 
-        df_group['lat'] = df_group['mesh_code'].apply(lambda x :ju.to_meshpoint(x, 0.5, 0.5)[0])
-        df_group['lon'] = df_group['mesh_code'].apply(lambda x: ju.to_meshpoint(x, 0.5, 0.5)[1])
-        df_group.to_csv(f"{output_dir}/trip_end_mesh{mesh_level}_hour.csv", index=False)
-
-    except psycopg2.Error as e:
-        print("NG Copy error! ")
-        print(e.pgerror)
-    データ読み込み
-    指定メッシュコードを取得
-    時間帯で滞在人数を合計
-    一時間単位の平均を取得
-    代表点座標取得
-    csv出力
-
+    path = f"{output_dir}/trip_end_mesh{mesh_level}_day.csv"
+    df_mesh_daytype_out.to_csv(path, index=False)
+    print(f"export population per mesh-daytype:{path}")
 
