@@ -8,27 +8,31 @@ from datetime import datetime
 import math
 import h3
 
+# 入力csvの配置
 data_dir = "../data"
+# 出力先
 output_dir = "../result"
 
-city = "tsukuba"
-
+# 対象都市と市町村コード
 start_hour = 6
 end_hour = 24
 max_speed = 150
+
+# 対象都市と市町村コード
+city = "tsukuba"
 
 city_dict = {
     "tsukuba": 8220,
     "tsuchiura": 8203,
 }
 
-meshlevel = 3 #集計するメッシュレベル
+#集計するODを集計するメッシュレベル
+meshlevel = 3
 
 
 semiMajorAxis = 6378137.0  # 赤道半径
 flattening = 1 / 298.257223563  # 扁平率
 e_2 = flattening * (2 - flattening)
-trip_interval_second = 10  # tripに記録する秒数の間隔
 degree = math.pi / 180
 line_color_rgb = (255, 120, 120) #geojsonのlineRGB
 
@@ -134,7 +138,7 @@ def path_to_trip_geojson(path):
 def output_trip_csv(trip_feature_list:[], user_cols_dict={}, path="trips.csv"):
     """
     :param trip_feature_list: [[{"geometry": {"coordinates": [[139.723445, 35.747456, 71.705, 1597278916], ...], "type": "LineString"}, "properties": {"color": "#ff7878"}, "type": "Feature"}]]
-    :param user_cols_dict: out_listに任意の属性がある場合に追加
+    :param user_cols_dict: 任意の属性を追加　keyが属性名，valueが属性値
     :param path: 出力パス
     :return:
     """
@@ -164,6 +168,7 @@ if __name__ == '__main__':
         df_city = df_city[df_city["os"]=="Android"]
         df_city = df_city[(df_city["hour"] >= start_hour)&(df_city["hour"] <= end_hour)]
         df_city.to_csv(f"{output_dir}/point_{city}.csv")
+        print(f"export trip animation data:{output_dir}/point_{city}.csv")
 
         # trip animationデータの抽出
         # 停止時に累積されるポイント（timer）は除去
@@ -217,6 +222,7 @@ if __name__ == '__main__':
 
         # export
         df_group.to_csv(f"{output_dir}/trip_end_mesh{meshlevel}_{city}.csv", index=False)
+        print(f"export mesh trip OD data:{output_dir}/trip_end_mesh{meshlevel}_{city}.csv")
 
         """
         # h3 indexでポイントを集計
