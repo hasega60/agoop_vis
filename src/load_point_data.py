@@ -13,9 +13,12 @@ data_dir = "../data"
 # 出力先
 output_dir = "../result"
 
-# 対象都市と市町村コード
-start_hour = 6
-end_hour = 24
+# アニメーション設定項目
+# 集計期間
+start_datetime='2019-10-03 6:00:00'
+end_datetime='2019-10-04 2:00:00'
+
+# 対象外とする
 max_speed = 150
 
 # 対象都市と市町村コード
@@ -29,6 +32,8 @@ city_dict = {
 #集計するODを集計するメッシュレベル
 meshlevel = 3
 
+#元データポイントの出力
+export_org_point = True
 
 semiMajorAxis = 6378137.0  # 赤道半径
 flattening = 1 / 298.257223563  # 扁平率
@@ -149,10 +154,10 @@ def output_trip_csv(trip_feature_list:[], user_cols_dict={}, path="trips.csv"):
             df_out[k] = v
 
     df_out.to_csv(path, index=False)
+    print(f"export trip animation data:{path}")
 
 if __name__ == '__main__':
     try:
-        # 市町村，記録時間をもとにデータ抽出
         df_all = pd.read_csv(f"{data_dir}/test_08.csv")
         df_all = df_all[["dailyid", "year", "month", "day", "dayofweek", "hour", "minute", "latitude", "longitude",
                          "os","logtype_subcategory","accuracy","speed","estimated_speed_flag","course",
@@ -164,11 +169,18 @@ if __name__ == '__main__':
         df_all["time"] = pd.to_datetime(df_time)
         df_all = df_all.sort_values(['dailyid', 'time'])
 
+        # データ抽出部分
         df_city = df_all[df_all["home_citycode"]==city_dict[city]]
         df_city = df_city[df_city["os"]=="Android"]
-        df_city = df_city[(df_city["hour"] >= start_hour)&(df_city["hour"] <= end_hour)]
-        df_city.to_csv(f"{output_dir}/point_{city}.csv")
-        print(f"export trip animation data:{output_dir}/point_{city}.csv")
+        df_city = df_city[(df_city['time'] > datetime.strptime(start_datetime, '%Y-%m-%d %H:%M:%S'))
+                          & (df_city['time'] < datetime.strptime(end_datetime, '%Y-%m-%d %H:%M:%S'))]
+        #df_city = df_city[(df_city["hour"] >= start_hour)&(df_city["hour"] <= end_hour)]
+
+        # 都市別ポイント抽出
+        if export_org_point:
+            path = f"{output_dir}/point_{city}.csv"
+            df_city.to_csv(path)
+            print(f"export city point data:{path}")
 
         # trip animationデータの抽出
         # 停止時に累積されるポイント（timer）は除去
@@ -190,7 +202,6 @@ if __name__ == '__main__':
         df_od_grouping = df_od[["dailyid","lon_from", "lat_from","lon_to", "lat_to","hour"]]
 
         # mesh集計
-
         def meshcode_from(row):
             return ju.to_meshcode(row["lat_from"], row["lon_from"], meshlevel)
 
@@ -221,8 +232,9 @@ if __name__ == '__main__':
         df_group['lat_mesh_to'] = df_group['mesh_to'].apply(lambda x: ju.to_meshpoint(x, 0.5, 0.5)[1])
 
         # export
-        df_group.to_csv(f"{output_dir}/trip_end_mesh{meshlevel}_{city}.csv", index=False)
-        print(f"export mesh trip OD data:{output_dir}/trip_end_mesh{meshlevel}_{city}.csv")
+        path=f"{output_dir}/trip_end_mesh{meshlevel}_{city}.csv"
+        df_group.to_csv(path, index=False)
+        print(f"export mesh trip OD data:{path}")
 
         """
         # h3 indexでポイントを集計
