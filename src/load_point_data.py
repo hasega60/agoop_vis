@@ -18,8 +18,10 @@ output_dir = "../result"
 start_datetime='2019-10-03 6:00:00'
 end_datetime='2019-10-04 2:00:00'
 
-# 対象外とする
+# pathを分離する最大速度
 max_speed = 150
+# pathを分断する最大時間差
+max_time_delta = 600
 
 # 対象都市と市町村コード
 city = "tsukuba"
@@ -100,8 +102,8 @@ def dataframe_to_trip(df:pd.DataFrame, trip_id_col, lat_col, lon_col, time_col, 
                 lat_before = lat
                 lon_before = lon
                 time_before = t
-                if delta_t < 600 and speed < max_speed and speed > 0:
-                    # 10分以内かつ二点間の速度が max_speed km/h以下，移動しているならpathとして追加
+                if delta_t <= max_time_delta and speed <= max_speed and speed > 0:
+                    # max_time_delta以内かつ, 二点間の速度が max_speed km/h以下，移動しているならpathとして追加
                     path.append([lon, lat, elevation, t])
                 else:
                     # それ以外なら別のpathにする
