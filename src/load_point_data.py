@@ -8,38 +8,27 @@ from datetime import datetime
 import math
 import h3
 
-# 入力csvの配置
-input_data = "../data/city_from_merge_8220_week3_oneday_2.csv"
-# 出力先
+data_dir = "../data"
 output_dir = "../result"
 
-# アニメーション設定項目
-# 集計期間
-start_datetime='2019-05-01 6:00:00'
-end_datetime='2019-05-06 0:00:00'
-
-# pathを分離する最大速度
-max_speed = 150
-# pathを分断する最大時間差
-max_time_delta = 600
-
-# 対象都市と市町村コード
 city = "tsukuba"
+
+start_hour = 6
+end_hour = 24
+max_speed = 150
 
 city_dict = {
     "tsukuba": 8220,
     "tsuchiura": 8203,
 }
 
-#集計するODを集計するメッシュレベル
-meshlevel = 4
+meshlevel = 3 #集計するメッシュレベル
 
-#元データポイントの出力
-export_org_point = True
 
 semiMajorAxis = 6378137.0  # 赤道半径
 flattening = 1 / 298.257223563  # 扁平率
 e_2 = flattening * (2 - flattening)
+trip_interval_second = 10  # tripに記録する秒数の間隔
 degree = math.pi / 180
 line_color_rgb = (255, 120, 120) #geojsonのlineRGB
 
@@ -69,7 +58,7 @@ def dataframe_to_trip(df:pd.DataFrame, trip_id_col, lat_col, lon_col, time_col, 
     cols = list(df.columns)
     df_trip_id = df[trip_id_col]
     trip_id = df_trip_id.unique()
-    for trip in tqdm(trip_id):
+    for trip in trip_id:
         df_trip = df.copy()
         df_trip = df_trip[df_trip[trip_id_col]==trip]
 
@@ -102,8 +91,8 @@ def dataframe_to_trip(df:pd.DataFrame, trip_id_col, lat_col, lon_col, time_col, 
                 lat_before = lat
                 lon_before = lon
                 time_before = t
-                if delta_t <= max_time_delta and speed <= max_speed and speed > 0:
-                    # max_time_delta以内かつ, 二点間の速度が max_speed km/h以下，移動しているならpathとして追加
+                if delta_t < 600 and speed < max_speed and speed > 0:
+                    # 10分以内かつ二点間の速度が max_speed km/h以下，移動しているならpathとして追加
                     path.append([lon, lat, elevation, t])
                 else:
                     # それ以外なら別のpathにする
@@ -145,7 +134,7 @@ def path_to_trip_geojson(path):
 def output_trip_csv(trip_feature_list:[], user_cols_dict={}, path="trips.csv"):
     """
     :param trip_feature_list: [[{"geometry": {"coordinates": [[139.723445, 35.747456, 71.705, 1597278916], ...], "type": "LineString"}, "properties": {"color": "#ff7878"}, "type": "Feature"}]]
-    :param user_cols_dict: 任意の属性を追加　keyが属性名，valueが属性値
+    :param user_cols_dict: out_listに任意の属性がある場合に追加
     :param path: 出力パス
     :return:
     """
@@ -156,11 +145,11 @@ def output_trip_csv(trip_feature_list:[], user_cols_dict={}, path="trips.csv"):
             df_out[k] = v
 
     df_out.to_csv(path, index=False)
-    print(f"export trip animation data:{path}")
 
 if __name__ == '__main__':
     try:
-        df_all = pd.read_csv(input_data)
+        # 市町村，記録時間をもとにデータ抽出
+        df_all = pd.read_csv(f"{data_dir}/test_08.csv")
         df_all = df_all[["dailyid", "year", "month", "day", "dayofweek", "hour", "minute", "latitude", "longitude",
                          "os","logtype_subcategory","accuracy","speed","estimated_speed_flag","course",
                          "prefcode", "citycode", "home_prefcode","home_citycode",
@@ -171,18 +160,10 @@ if __name__ == '__main__':
         df_all["time"] = pd.to_datetime(df_time)
         df_all = df_all.sort_values(['dailyid', 'time'])
 
-        # データ抽出部分
         df_city = df_all[df_all["home_citycode"]==city_dict[city]]
         df_city = df_city[df_city["os"]=="Android"]
-        df_city = df_city[(df_city['time'] >= datetime.strptime(start_datetime, '%Y-%m-%d %H:%M:%S'))
-                          & (df_city['time'] <= datetime.strptime(end_datetime, '%Y-%m-%d %H:%M:%S'))]
-        #df_city = df_city[(df_city["hour"] >= start_hour)&(df_city["hour"] <= end_hour)]
-
-        # 都市別ポイント抽出
-        if export_org_point:
-            path = f"{output_dir}/point_{city}.csv"
-            df_city.to_csv(path)
-            print(f"export city point data:{path}")
+        df_city = df_city[(df_city["hour"] >= start_hour)&(df_city["hour"] <= end_hour)]
+        df_city.to_csv(f"{output_dir}/point_{city}.csv")
 
         # trip animationデータの抽出
         # 停止時に累積されるポイント（timer）は除去
@@ -204,6 +185,7 @@ if __name__ == '__main__':
         df_od_grouping = df_od[["dailyid","lon_from", "lat_from","lon_to", "lat_to","hour"]]
 
         # mesh集計
+
         def meshcode_from(row):
             return ju.to_meshcode(row["lat_from"], row["lon_from"], meshlevel)
 
@@ -231,12 +213,10 @@ if __name__ == '__main__':
         df_group['lat_mesh_from'] = df_group['mesh_from'].apply(lambda x :ju.to_meshpoint(x, 0.5, 0.5)[0])
         df_group['lon_mesh_from'] = df_group['mesh_from'].apply(lambda x: ju.to_meshpoint(x, 0.5, 0.5)[1])
         df_group['lat_mesh_to'] = df_group['mesh_to'].apply(lambda x :ju.to_meshpoint(x, 0.5, 0.5)[0])
-        df_group['lon_mesh_to'] = df_group['mesh_to'].apply(lambda x: ju.to_meshpoint(x, 0.5, 0.5)[1])
+        df_group['lat_mesh_to'] = df_group['mesh_to'].apply(lambda x: ju.to_meshpoint(x, 0.5, 0.5)[1])
 
         # export
-        path=f"{output_dir}/trip_end_mesh{meshlevel}_{city}.csv"
-        df_group.to_csv(path, index=False)
-        print(f"export mesh trip OD data:{path}")
+        df_group.to_csv(f"{output_dir}/trip_end_mesh{meshlevel}_{city}.csv", index=False)
 
         """
         # h3 indexでポイントを集計
@@ -334,3 +314,4 @@ if __name__ == '__main__':
     except psycopg2.Error as e:
         print("NG Copy error! ")
         print(e.pgerror)
+
