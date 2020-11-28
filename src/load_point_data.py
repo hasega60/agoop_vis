@@ -35,7 +35,9 @@ city_dict = {
 meshlevel = 4
 
 #元データポイントの出力
-export_org_point = True
+export_org_point = False
+# 出力プリント文の表示
+print_export_string= False
 
 semiMajorAxis = 6378137.0  # 赤道半径
 flattening = 1 / 298.257223563  # 扁平率
@@ -156,18 +158,24 @@ def output_trip_csv(trip_feature_list:[], user_cols_dict={}, path="trips.csv"):
             df_out[k] = v
 
     df_out.to_csv(path, index=False)
-    print(f"export trip animation data:{path}")
+    if print_export_string:
+        print(f"export trip animation data:{path}")
 
 if __name__ == '__main__':
     try:
+
         df_all = pd.read_csv(input_data)
         df_all = df_all[["dailyid", "year", "month", "day", "dayofweek", "hour", "minute", "latitude", "longitude",
                          "os","logtype_subcategory","accuracy","speed","estimated_speed_flag","course",
                          "prefcode", "citycode", "home_prefcode","home_citycode",
                          "workplace_prefcode","workplace_citycode","transportation_type", "gender"]]
 
+        #なぜか日付がすべて1になるので，dayofweekで代用
+        #df_time = df_all[["year", "month", "day", "hour", "minute"]]
 
-        df_time = df_all[["year", "month", "day", "hour", "minute"]]
+
+        df_time = df_all[["year", "month", "dayofweek", "hour", "minute"]]
+        df_time=df_time.rename(columns={"dayofweek":"day"})
         df_all["time"] = pd.to_datetime(df_time)
         df_all = df_all.sort_values(['dailyid', 'time'])
 
@@ -182,7 +190,40 @@ if __name__ == '__main__':
         if export_org_point:
             path = f"{output_dir}/point_{city}.csv"
             df_city.to_csv(path)
-            print(f"export city point data:{path}")
+            if print_export_string:
+               print(f"export city point data:{path}")
+
+        # 滞在地点の抽出
+        df_city_stay = df_city[(df_city["logtype_subcategory"] == "timer")|(df_city["speed"] <= 2)]
+
+        #30分単位のカテゴリ付与
+        def get_hhb(row):
+            return int((row["hour"] * 60 + row["minute"])/30)
+
+        df_city_stay["half_hour_bin"] = df_city_stay.apply(get_hhb, axis=1)
+
+        # 30分単位でのtrip重複除去
+        df_city_stay_group = df_city_stay.groupby(["dailyid","dayofweek", "half_hour_bin"], as_index=False).first()
+        path = f"{output_dir}/stay_hhb_{city}.csv"
+        df_city_stay_group.to_csv(path)
+        if print_export_string:
+            print(f"export stay point data:{path}")
+
+        # h3_indexを付与
+        h3_index_level = 10
+        def get_h3_index(row):
+            return h3.geo_to_h3(row.latitude, row.longitude, h3_index_level)
+
+        df_city_stay_group["h3_index"] = df_city_stay_group.apply(get_h3_index, axis=1)
+        df_city_stay_h3_group = df_city_stay_group.groupby(["h3_index", "dayofweek", "half_hour_bin"], as_index=False).count()
+        df_city_stay_h3_group = df_city_stay_h3_group[["h3_index", "dayofweek", "half_hour_bin", "dailyid"]]
+        df_city_stay_h3_group = df_city_stay_h3_group.rename(columns={"dailyid": "count"})
+
+        path = f"{output_dir}/stay_hhb_h3{h3_index_level}_{city}.csv"
+        df_city_stay_h3_group.to_csv(path)
+        if print_export_string:
+            print(f"export stay h3 data:{path}")
+
 
         # trip animationデータの抽出
         # 停止時に累積されるポイント（timer）は除去
@@ -236,7 +277,8 @@ if __name__ == '__main__':
         # export
         path=f"{output_dir}/trip_end_mesh{meshlevel}_{city}.csv"
         df_group.to_csv(path, index=False)
-        print(f"export mesh trip OD data:{path}")
+        if print_export_string:
+            print(f"export mesh trip OD data:{path}")
 
         """
         # h3 indexでポイントを集計
