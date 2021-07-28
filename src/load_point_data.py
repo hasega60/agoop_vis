@@ -1,45 +1,49 @@
 import pandas as pd
 import psycopg2
 import jismesh.utils as ju
-import numpy as np
 from geojson import Point, LineString, Feature, FeatureCollection
 from tqdm import tqdm
 from datetime import datetime
 import math
 import h3
+import os
 
 # 入力csvの配置
-input_data = "../data/city_from_merge_8220_week3_oneday_2.csv"
+#input_path = "../data/city_from_merge_8220_week3"
+input_path = "../data/chiba/202004"
 # 出力先
 output_dir = "../result"
 
 # アニメーション設定項目
 # 集計期間
-start_datetime='2019-05-01 6:00:00'
-end_datetime='2019-05-06 0:00:00'
-data_dir = "../data"
-output_dir = "../result"
-
-city = "tsukuba"
+#start_datetime='2019-05-01 6:00:00'
+#end_datetime='2019-05-06 0:00:00'
 
 
-start_hour = 6
-end_hour = 24
-max_speed = 150
+start_datetime=None
+end_datetime=None
+
+#city = "tsukuba"
+city = "chiba_all"
+
+max_speed = 200
 
 city_dict = {
     "tsukuba": 8220,
     "tsuchiura": 8203,
+    "kashiwa": 12217
 }
+# オプションデータがあるか
+has_option = False
 
 #集計するODを集計するメッシュレベル
 meshlevel = 4
+h3_index_level = 9
 
 #元データポイントの出力
 export_org_point = False
 # 出力プリント文の表示
 print_export_string= False
-
 
 semiMajorAxis = 6378137.0  # 赤道半径
 flattening = 1 / 298.257223563  # 扁平率
@@ -57,8 +61,8 @@ def distance_latlon(x1, y1, x2, y2):
     return math.sqrt((dx * dx + dy * dy) * w2) * semiMajorAxis * degree
 
 
-def dataframe_to_trip(df:pd.DataFrame, trip_id_col, lat_col, lon_col, time_col, max_speed=150,  out_altitude=False):
 
+def dataframe_to_trip(df:pd.DataFrame, trip_id_col, lat_col, lon_col, time_col,altitude_col=None, max_speed=150):
     def _add_output(path, trip, trip_count, trip_origin_destination, trip_out, id_out, id_out_org):
         od = path[0]
         d = path[-1]
@@ -74,15 +78,13 @@ def dataframe_to_trip(df:pd.DataFrame, trip_id_col, lat_col, lon_col, time_col, 
     cols = list(df.columns)
     df_trip_id = df[trip_id_col]
     trip_id = df_trip_id.unique()
-    for trip in tqdm(trip_id):
-        df_trip = df.copy()
-        df_trip = df_trip[df_trip[trip_id_col]==trip]
 
-        values = df_trip.values
+    for trip in trip_id:
+        points = df[df[trip_id_col]==trip].values
         path = []
         trip_count=0
         time_before, lat_before, lon_before = -1, -1, -1
-        for point in values:
+        for point in points:
             time_jst= int(point[cols.index(time_col)].timestamp())
             """
             time_unix = int(point[cols.index(time_col)].timestamp())
@@ -93,9 +95,9 @@ def dataframe_to_trip(df:pd.DataFrame, trip_id_col, lat_col, lon_col, time_col, 
             lat = point[cols.index(lat_col)]
             lon = point[cols.index(lon_col)]
             elevation = 0
-            if out_altitude:
+            if altitude_col is not None:
                 # 高さを考慮するとき
-                elevation = point.elevation
+                elevation = point.altitude_col
             t = time_jst
 
             if time_before != -1:
@@ -166,197 +168,170 @@ def output_trip_csv(trip_feature_list:[], user_cols_dict={}, path="trips.csv"):
 
 if __name__ == '__main__':
     try:
+        # 読み込むファイル一覧
+        csvfiles = []
+        for f in os.listdir(input_path):
+            if not os.path.isdir(input_path + "/" + f):
+                if os.path.splitext(f)[1] == ".csv":
+                    csvfiles.append(input_path + "/" + f)
 
-        df_all = pd.read_csv(input_data)
-        df_all = df_all[["dailyid", "year", "month", "day", "dayofweek", "hour", "minute", "latitude", "longitude",
-                         "os","logtype_subcategory","accuracy","speed","estimated_speed_flag","course",
-                         "prefcode", "citycode", "home_prefcode","home_citycode",
-                         "workplace_prefcode","workplace_citycode","transportation_type", "gender"]]
-
-        #なぜか日付がすべて1になるので，dayofweekで代用
-        #df_time = df_all[["year", "month", "day", "hour", "minute"]]
-
-
-        df_time = df_all[["year", "month", "dayofweek", "hour", "minute"]]
-        df_time=df_time.rename(columns={"dayofweek":"day"})
-        df_all["time"] = pd.to_datetime(df_time)
-        df_all = df_all.sort_values(['dailyid', 'time'])
-
-        df_city = df_all[df_all["home_citycode"]==city_dict[city]]
-        df_city = df_city[df_city["os"]=="Android"]
-
-        df_city = df_city[(df_city['time'] >= datetime.strptime(start_datetime, '%Y-%m-%d %H:%M:%S'))
-                          & (df_city['time'] <= datetime.strptime(end_datetime, '%Y-%m-%d %H:%M:%S'))]
-        #df_city = df_city[(df_city["hour"] >= start_hour)&(df_city["hour"] <= end_hour)]
-
-        # 都市別ポイント抽出
-        if export_org_point:
-            path = f"{output_dir}/point_{city}.csv"
-            df_city.to_csv(path)
-            if print_export_string:
-               print(f"export city point data:{path}")
-
-        # 滞在地点の抽出
-        df_city_stay = df_city[(df_city["logtype_subcategory"] == "timer")|(df_city["speed"] <= 2)]
-
-        #30分単位のカテゴリ付与
-        def get_hhb(row):
-            return int((row["hour"] * 60 + row["minute"])/30)
-
-        df_city_stay["half_hour_bin"] = df_city_stay.apply(get_hhb, axis=1)
-
-        # 30分単位でのtrip重複除去
-        df_city_stay_group = df_city_stay.groupby(["dailyid","dayofweek", "half_hour_bin"], as_index=False).first()
-        path = f"{output_dir}/stay_hhb_{city}.csv"
-        df_city_stay_group.to_csv(path)
-        if print_export_string:
-            print(f"export stay point data:{path}")
-
-        # h3_indexを付与
-        h3_index_level = 10
-        def get_h3_index(row):
-            return h3.geo_to_h3(row.latitude, row.longitude, h3_index_level)
-
-        df_city_stay_group["h3_index"] = df_city_stay_group.apply(get_h3_index, axis=1)
-        df_city_stay_h3_group = df_city_stay_group.groupby(["h3_index", "dayofweek", "half_hour_bin"], as_index=False).count()
-        df_city_stay_h3_group = df_city_stay_h3_group[["h3_index", "dayofweek", "half_hour_bin", "dailyid"]]
-        df_city_stay_h3_group = df_city_stay_h3_group.rename(columns={"dailyid": "count"})
-
-        path = f"{output_dir}/stay_hhb_h3{h3_index_level}_{city}.csv"
-        df_city_stay_h3_group.to_csv(path)
-        if print_export_string:
-            print(f"export stay h3 data:{path}")
-
-        # trip animationデータの抽出
-        # 停止時に累積されるポイント（timer）は除去
-        df_city_trip = df_city[df_city["logtype_subcategory"]!="timer"]
-        trip_list, id_list, id_out_org, trip_origin_destination = dataframe_to_trip(df_city_trip, trip_id_col="dailyid",
-                                      lat_col="latitude", lon_col="longitude",time_col="time", max_speed=max_speed)
-
-        id_col_dict={"dailyid_c": id_list, "dailyid": id_out_org}
-        output_trip_csv(trip_feature_list=trip_list, user_cols_dict=id_col_dict, path=f"{output_dir}/trips_{city}.csv")
-        df_od = pd.DataFrame(trip_origin_destination, columns=["lon_from", "lat_from", "elevation_from", "time_from",
-                                                               "lon_to", "lat_to", "elevation_to", "time_to"])
-
-        for k, v in id_col_dict.items():
-            df_od[k] = v
-
-        # 時間属性を付与
-        df_od["hour"] = df_od['time_from'].apply(lambda x: datetime.fromtimestamp(x).hour)
-
-        df_od_grouping = df_od[["dailyid","lon_from", "lat_from","lon_to", "lat_to","hour"]]
-
-        # mesh集計
-
-        def meshcode_from(row):
-            return ju.to_meshcode(row["lat_from"], row["lon_from"], meshlevel)
-
-        def meshcode_to(row):
-            return ju.to_meshcode(row["lat_to"], row["lon_to"], meshlevel)
-
-        df_od_grouping['mesh_from'] = df_od_grouping.apply(meshcode_from, axis=1)
-        df_od_grouping['mesh_to'] = df_od_grouping.apply(meshcode_to, axis=1)
-
-        # 起終点メッシュで集計
-        df_group = df_od_grouping.groupby(["mesh_from", "mesh_to"], as_index=False).count()
-        df_group = df_group[["mesh_from", "mesh_to", "dailyid"]]
-
-        # hour, 起終点メッシュで集計
-        """
-        df_group = df_od_grouping.groupby(["mesh_from", "mesh_to", "hour"], as_index=False).count()
-        df_group = df_group[["mesh_from", "mesh_to", "hour", "dailyid"]]
-        """
-
-        df_group = df_group.rename(columns={'dailyid': 'count'})
-
-        coords_from = ju.to_meshpoint(df_group['mesh_from'], 0.5, 0.5)
-        coords_to = ju.to_meshpoint(df_group['mesh_to'], 0.5, 0.5)
-
-        df_group['lat_mesh_from'] = df_group['mesh_from'].apply(lambda x :ju.to_meshpoint(x, 0.5, 0.5)[0])
-        df_group['lon_mesh_from'] = df_group['mesh_from'].apply(lambda x: ju.to_meshpoint(x, 0.5, 0.5)[1])
-        df_group['lat_mesh_to'] = df_group['mesh_to'].apply(lambda x :ju.to_meshpoint(x, 0.5, 0.5)[0])
-        df_group['lon_mesh_to'] = df_group['mesh_to'].apply(lambda x: ju.to_meshpoint(x, 0.5, 0.5)[1])
-
-        # export
-        path=f"{output_dir}/trip_end_mesh{meshlevel}_{city}.csv"
-        df_group.to_csv(path, index=False)
-        if print_export_string:
-            print(f"export mesh trip OD data:{path}")
-
-
-        """
-        # h3 indexでポイントを集計
-        h3_index_level=9
-        df_hour = df_all[["year", "month", "day", "hour"]]
-        text = lambda x: f't{x}'
-        df_h3 = df_all[["dailyid", "latitude", "longitude","transportation_type"]]
-        df_h3["time"] = pd.to_datetime(df_hour)
-        df_h3["transportation_type"] = df_h3["transportation_type"].map(text)
-        h3_index = lambda x: h3.geo_to_h3(x.latitude, x.longitude, h3_index_level)
-        df_h3["h3_index"] = df_h3[["latitude", "longitude"]].apply(h3_index, axis=1)
-        df_group_h3 = df_h3.groupby(["h3_index", "time"], as_index=False).count()
-        df_group_h3 = df_group_h3.rename(columns={'dailyid': 'count'})
-        # export
-        df_group_h3.to_csv(f"test_h3_{h3_index_level}.csv", index=False)
-        user_order = 0
-        dailyid = ""
-        orders ,trip_ends = [], []
-        for r in tqdm(df_all.values):
-            # 順番つけて
-            if dailyid != r[0]:
-                user_order = 0
-                dailyid = r[0]
-                trip_ends.append(r)
+        file = csvfiles[0]
+        pbar = tqdm(csvfiles)
+        df_city_stay_h3_group_out, df_mesh_group_out = None, None
+        for file in pbar:
+            pbar.set_description(f"Processing..{os.path.basename(file)}")
+            file_day = os.path.splitext(os.path.basename(file))[0].split("_")[2]
+            df_all = pd.read_csv(file)
+            if has_option:
+                df_all = df_all[["dailyid", "year", "month", "day", "dayofweek", "hour", "minute", "latitude", "longitude",
+                                 "os","logtype_subcategory","accuracy","speed","estimated_speed_flag","course",
+                                 "prefcode", "citycode", "home_prefcode","home_citycode",
+                                 "workplace_prefcode","workplace_citycode","transportation_type", "gender"]]
             else:
-                if user_order == 0:
-                    trip_ends.append(r)
-                user_order += 1
-            orders.append(user_order)
-        df_tripend = pd.DataFrame(trip_ends, columns=df_all.columns)
-        df_tripend = df_tripend[["dailyid", "time", "logtype_subcategory", "transportation_type", "latitude", "longitude"]]
-        trips = []
-        r_before = None
-        for r in tqdm(df_tripend.values):
-            if r_before is None:
-                r_before = r
+                df_all = df_all[
+                    ["dailyid", "year", "month", "day", "dayofweek", "hour", "minute", "latitude", "longitude",
+                     "os", "logtype_subcategory", "accuracy", "speed", "estimated_speed_flag", "course",
+                     "prefcode", "citycode"]]
+            #なぜか日付がすべて1になるので，dayofweekで代用
+            df_time = df_all[["year", "month", "day", "hour", "minute"]]
+            #df_time = df_all[["year", "month", "dayofweek", "hour", "minute"]]
+            df_time=df_time.rename(columns={"dayofweek":"day"})
+            df_all["time"] = pd.to_datetime(df_time)
+            df_all = df_all.sort_values(['dailyid', 'time'])
+
+            #Androidだけ対象にする
+            #df_all = df_all[df_all["os"] == "Android"]
+            # 都市でフィルタ (dictになければすべて)
+            if city in (city_dict.keys()):
+                if has_option:
+                    df_city = df_all[df_all["home_citycode"]==city_dict[city]]
+                else:
+                    df_city = df_all[df_all["citycode"]==city_dict[city]]
+            else:
+                df_city = df_all
+
+            # ひっかからなかったらskip
+            if len(df_city) == 0:
                 continue
-            if r_before[0] == r[0] and r_before[1] != r[1]:
-                time_to, lat_to, lon_to = r[1], r[-2], r[-1]
-                r_before = np.append(r_before,[time_to, lat_to, lon_to])
-                trips.append(r_before)
-            r_before = r
-        df_all["user_order"] = orders
-        # 属性絞って全て出力
-        #df_export = df_all[["dailyid", "time","user_order", "logtype_subcategory","transportation_type", "latitude", "longitude"]]
-        #df_export.to_csv("test_export.csv", index=False)
-        # logtype_subcategory属性でトリップ抽出
-        df_trip_logtype = df_all[(df_all["logtype_subcategory"] == "move")|(df_all["logtype_subcategory"] == "arrival")|
-                         (df_all["logtype_subcategory"] == "departure")|(df_all["logtype_subcategory"] == "timer")]
-        df_trip_logtype = df_trip_logtype[["dailyid", "time", "user_order", "logtype_subcategory", "transportation_type", "latitude", "longitude"]]
+
+            if start_datetime is not None:
+                df_city = df_city[df_city['time'] >= datetime.strptime(start_datetime, '%Y-%m-%d %H:%M:%S')]
+
+            if end_datetime is not None:
+                df_city = df_city[df_city['time'] <= datetime.strptime(end_datetime, '%Y-%m-%d %H:%M:%S')]
+            # 都市別ポイント抽出
+            if export_org_point:
+                path = f"{output_dir}/{city}/point.csv"
+                df_city.to_csv(path)
+                if print_export_string:
+                   print(f"export city point data:{path}")
+
+            # 滞在地点の抽出
+            """
+            df_city_stay = df_city[(df_city["logtype_subcategory"] == "timer")|
+                                   (df_city["logtype_subcategory"] == "􏸛􏷅􏷅􏸁􏸧􏸛􏸘􏸛􏷅􏷅􏸁􏸧􏸛􏸘arrival")|
+                                   (df_city["speed"] <= 2)]
+            """
+            df_city_stay = df_city[(df_city["logtype_subcategory"] == "timer")|
+                                   (df_city["logtype_subcategory"] == "􏸛􏷅􏷅􏸁􏸧􏸛􏸘􏸛􏷅􏷅􏸁􏸧􏸛􏸘arrival")]
+
+            #30分単位のカテゴリ付与
+            def get_hhb(row):
+                return int((row["hour"] * 60 + row["minute"])/30)
+
+            df_city_stay["half_hour_bin"] = df_city_stay.apply(get_hhb, axis=1)
+
+            # 30分単位でのtrip重複除去
+            df_city_stay_group = df_city_stay.groupby(["dailyid","dayofweek", "half_hour_bin"], as_index=False).first()
+            path = f"{output_dir}/{city}/stay_hhb.csv"
+            df_city_stay_group.to_csv(path)
+            if print_export_string:
+                print(f"export stay point data:{path}")
+
+            pbar.set_description(f"h3_index...{os.path.basename(file)}")
+            # h3_indexを付与
+            def get_h3_index(row):
+                return h3.geo_to_h3(row.latitude, row.longitude, h3_index_level)
+
+            df_city_stay_group["h3_index"] = df_city_stay_group.apply(get_h3_index, axis=1)
+            df_city_stay_h3_group = df_city_stay_group.groupby(["h3_index", "dayofweek", "half_hour_bin"], as_index=False).count()
+            df_city_stay_h3_group = df_city_stay_h3_group[["h3_index", "dayofweek", "half_hour_bin", "dailyid"]]
+            df_city_stay_h3_group = df_city_stay_h3_group.rename(columns={"dailyid": "count"})
+
+            if df_city_stay_h3_group_out is None:
+                df_city_stay_h3_group_out = df_city_stay_h3_group
+            else:
+                df_city_stay_h3_group_out = df_city_stay_h3_group_out.append(df_city_stay_h3_group)
+
+            if print_export_string:
+                print(f"export stay h3 data:{path}")
+
+            # trip animationデータの抽出
+            pbar.set_description(f"creating trip...{os.path.basename(file)}")
+            # 停止時に累積されるポイント（timer）は除去
+            df_city_trip = df_city[df_city["logtype_subcategory"]!="timer"]
+            trip_list, id_list, id_out_org, trip_origin_destination = dataframe_to_trip(df_city_trip, trip_id_col="dailyid",
+                                          lat_col="latitude", lon_col="longitude",time_col="time", max_speed=max_speed)
+
+            id_col_dict={"dailyid_c": id_list, "dailyid": id_out_org}
+            output_trip_csv(trip_feature_list=trip_list, user_cols_dict=id_col_dict, path=f"{output_dir}/{city}/trips_{file_day}.csv")
+            df_od = pd.DataFrame(trip_origin_destination, columns=["lon_from", "lat_from", "elevation_from", "time_from",
+                                                                   "lon_to", "lat_to", "elevation_to", "time_to"])
+
+            for k, v in id_col_dict.items():
+                df_od[k] = v
+
+            # 時間属性を付与
+            df_od["hour"] = df_od['time_from'].apply(lambda x: datetime.fromtimestamp(x).hour)
+            df_od_grouping = df_od[["dailyid","lon_from", "lat_from","lon_to", "lat_to","hour"]]
+
+            # mesh集計
+            def meshcode_from(row):
+                return ju.to_meshcode(row["lat_from"], row["lon_from"], meshlevel)
+
+            def meshcode_to(row):
+                return ju.to_meshcode(row["lat_to"], row["lon_to"], meshlevel)
+
+            df_od_grouping['mesh_from'] = df_od_grouping.apply(meshcode_from, axis=1)
+            df_od_grouping['mesh_to'] = df_od_grouping.apply(meshcode_to, axis=1)
+
+            # 起終点メッシュで集計
+            pbar.set_description(f"creating mesh...{os.path.basename(file)}")
+            df_mesh_group = df_od_grouping.groupby(["mesh_from", "mesh_to"], as_index=False).count()
+            df_mesh_group = df_mesh_group[["mesh_from", "mesh_to", "dailyid"]]
+            if df_mesh_group_out is None:
+                df_mesh_group_out = df_mesh_group
+            else:
+                df_mesh_group_out = df_mesh_group_out.append(df_mesh_group)
+
+            # hour, 起終点メッシュで集計
+            """
+            df_group = df_od_grouping.groupby(["mesh_from", "mesh_to", "hour"], as_index=False).count()
+            df_group = df_group[["mesh_from", "mesh_to", "hour", "dailyid"]]
+            """
+
+            if print_export_string:
+                print(f"export mesh trip OD data:{path}")
+
+        df_city_stay_h3_group_out = df_city_stay_h3_group_out.groupby(["h3_index", "dayofweek", "half_hour_bin"],
+                                                           as_index=False).mean()
+        path = f"{output_dir}/{city}/stay_hhb_h3_{h3_index_level}.csv"
+        df_city_stay_h3_group_out.to_csv(path)
+
+        df_mesh_group_out = df_mesh_group_out.groupby(["mesh_from", "mesh_to"], as_index=False).mean()
+
+        df_mesh_group_out = df_mesh_group_out.rename(columns={'dailyid': 'count'})
+        coords_from = ju.to_meshpoint(df_mesh_group_out['mesh_from'], 0.5, 0.5)
+        coords_to = ju.to_meshpoint(df_mesh_group_out['mesh_to'], 0.5, 0.5)
+
+        df_mesh_group_out['lat_mesh_from'] = df_mesh_group_out['mesh_from'].apply(lambda x: ju.to_meshpoint(x, 0.5, 0.5)[0])
+        df_mesh_group_out['lon_mesh_from'] = df_mesh_group_out['mesh_from'].apply(lambda x: ju.to_meshpoint(x, 0.5, 0.5)[1])
+        df_mesh_group_out['lat_mesh_to'] = df_mesh_group_out['mesh_to'].apply(lambda x: ju.to_meshpoint(x, 0.5, 0.5)[0])
+        df_mesh_group_out['lon_mesh_to'] = df_mesh_group_out['mesh_to'].apply(lambda x: ju.to_meshpoint(x, 0.5, 0.5)[1])
+
         # export
-        df_trip_logtype.to_csv("test_trip_logtype.csv", index=False)
-        df_trip = pd.DataFrame(trips, columns=["dailyid", "time_from", "logtype_subcategory", "transportation_type",
-                                               "lat_from", "lon_from", "time_to", "lat_to", "lon_to"])
-        text = lambda x: f't{x}'
-        df_trip["transportation_type"] = df_trip["transportation_type"].map(text)
-        # export
-        df_trip.to_csv("test_trip_end.csv", index=False)
-        # mesh集計
-        meshlevel = 4
-        df_trip['mesh_from'] = ju.to_meshcode(df_trip.lat_from, df_trip.lon_from, meshlevel)
-        df_trip['mesh_to'] = ju.to_meshcode(df_trip.lat_to, df_trip.lon_to, meshlevel)
-        df_group = df_trip.groupby(["mesh_from", "mesh_to", "transportation_type"], as_index=False).count()
-        df_group = df_group[["mesh_from", "mesh_to", "transportation_type", "time_from"]]
-        df_group = df_group.rename(columns={'time_from': 'count'})
-        coords_from = ju.to_meshpoint(df_group['mesh_from'], 0.5, 0.5)
-        coords_to = ju.to_meshpoint(df_group['mesh_to'], 0.5, 0.5)
-        df_group['lat_mesh_from'] = ju.to_meshpoint(df_group['mesh_from'], 0.5, 0.5)[0]
-        df_group['lon_mesh_from'] = ju.to_meshpoint(df_group['mesh_from'], 0.5, 0.5)[1]
-        df_group['lat_mesh_to'] = ju.to_meshpoint(df_group['mesh_to'], 0.5, 0.5)[0]
-        df_group['lon_mesh_to'] = ju.to_meshpoint(df_group['mesh_to'], 0.5, 0.5)[1]
-        # export
-        df_group.to_csv(f"test_trip_end_mesh{meshlevel}.csv", index=False)
-        """
+        path = f"{output_dir}/{city}/trip_end_mesh{meshlevel}.csv"
+        df_mesh_group_out.to_csv(path, index=False)
 
     except psycopg2.Error as e:
         print("NG Copy error! ")
