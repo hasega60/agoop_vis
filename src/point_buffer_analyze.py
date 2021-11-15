@@ -1,5 +1,6 @@
 import pandas as pd
 import geopandas as gpd
+import numpy as np
 import psycopg2
 import jismesh.utils as ju
 from shapely.geometry import LineString as LineString_shapely
@@ -11,11 +12,14 @@ import math
 import h3
 import os
 
+"""
+バッファ内を通過する移動の経路長，時間を取得
+"""
 
 # 入力csvの配置
 #input_path = "../data/city_from_merge_8220_week3"
-input_path = "../data/chiba/202004"
-buffer_path = "../data/shape/station_2019_buffer_tokyo_JREast.gpkg"
+input_path = "../data/point_201910"
+buffer_path = "../data/shape/station_2019_buffer_tokyo_JREast_sub.gpkg"
 # 出力先
 output_dir = "../result/"
 
@@ -23,6 +27,10 @@ output_dir = "../result/"
 # オプションデータがあるか
 has_option = False
 
+read_col =["dailyid", "year", "month", "day", "dayofweek", "hour", "minute", "latitude", "longitude",
+                 "os", "logtype_subcategory"]
+
+buffer_latlon = 0.01
 
 semiMajorAxis = 6378137.0  # 赤道半径
 flattening = 1 / 298.257223563  # 扁平率
@@ -46,40 +54,55 @@ if __name__ == '__main__':
     csvfiles = []
     for f in os.listdir(input_path):
         if not os.path.isdir(input_path + "/" + f):
-            if os.path.splitext(f)[1] == ".csv":
+            if os.path.splitext(f)[1] == ".csv" or os.path.splitext(f)[1] == ".gz":
                 csvfiles.append(input_path + "/" + f)
 
 
     file = csvfiles[0]
     gdf_buffer = gpd.read_file(buffer_path)
     gdf_buffer["station_id"] = gdf_buffer.index
+
+    # 名前から重複を除去
+    gdf_buffer = gdf_buffer.drop_duplicates(subset="N05_011")
+
+    # データの切り出し領域　バッファレイヤにすこし余裕を持たせた領域にする
+    bounds = gdf_buffer.bounds
+    minx = np.min(bounds["minx"].values) - buffer_latlon
+    miny = np.min(bounds["miny"].values)- buffer_latlon
+    maxx = np.max(bounds["maxx"].values)+ buffer_latlon
+    maxy = np.max(bounds["maxy"].values)+ buffer_latlon
+
     buffer_cols = list(gdf_buffer.columns)
-    pbar = tqdm(csvfiles)
     df_city_stay_h3_group_out, df_mesh_group_out,df_did_convex_out_all = None, None, None
-    for file in pbar:
-        pbar.set_description(f"Processing..{os.path.basename(file)}")
-        file_day = os.path.splitext(os.path.basename(file))[0].split("_")[2]
-        df_all = pd.read_csv(file)
-        if has_option:
-            df_all = df_all[["dailyid", "year", "month", "day", "dayofweek", "hour", "minute", "latitude", "longitude",
-                             "os","logtype_subcategory","accuracy","speed","estimated_speed_flag","course",
-                             "prefcode", "citycode", "home_prefcode","home_citycode",
-                             "workplace_prefcode","workplace_citycode","transportation_type", "gender"]]
+    for file in csvfiles:
+        ext = os.path.splitext(os.path.basename(file))[1]
+        file_day, df_all = None, None
+        if ext==".gz":
+            # .csv.gzファイル対応
+            file_day = os.path.splitext(os.path.splitext(os.path.basename(file))[0])[0].split("_")[1]
+           # 激重なので，chunksizeで分割し，領域内だけ抽出して結合していく
+
+            df_all_ite = pd.read_csv(file, usecols=read_col, chunksize=1000000, low_memory=False)
+            for df in tqdm(df_all_ite, desc=f"read:{file_day}"):
+                df_row = df[(df["longitude"].between(minx, maxx))&(df["latitude"].between(miny, maxy))]
+                if df_all is None:
+                    df_all = df_row
+                else:
+                    df_all = pd.concat([df_all, df_row],ignore_index=True)
+
+        elif ext==".csv":
+            file_day = os.path.splitext(os.path.basename(file))[0].split("_")[2]
+            df_all = pd.read_csv(file, usecols=read_col, low_memory=False)
         else:
-            df_all = df_all[
-                ["dailyid", "year", "month", "day", "dayofweek", "hour", "minute", "latitude", "longitude",
-                 "os", "logtype_subcategory", "accuracy", "speed", "estimated_speed_flag", "course",
-                 "prefcode", "citycode"]]
-        #なぜか日付がすべて1になるので，dayofweekで代用
+            continue
+
         df_time = df_all[["year", "month", "day", "hour", "minute"]]
-        #df_time = df_all[["year", "month", "dayofweek", "hour", "minute"]]
-        df_time=df_time.rename(columns={"dayofweek":"day"})
         df_all["time"] = pd.to_datetime(df_time)
         # daylyid別に，時間でソート
-        df_all = df_all.sort_values(['dailyid', 'time'])
+        df_all.sort_values(['dailyid', 'time'], inplace=True)
         points_out, lines_out = [], []
 
-        for buffer in gdf_buffer.values:
+        for buffer in tqdm(gdf_buffer.values, desc=f"buffer processing:{file_day}"):
             buffer_geom = buffer[buffer_cols.index("geometry")]
             station_id = buffer[buffer_cols.index("station_id")]
             station_name = buffer[buffer_cols.index("N05_011")]
@@ -90,6 +113,7 @@ if __name__ == '__main__':
             gdf_point_in_buffer = gpd.GeoDataFrame(df_point_in_buffer, geometry=gpd.points_from_xy(df_point_in_buffer["longitude"], df_point_in_buffer["latitude"]))
             gdf_point_in_buffer.set_crs(epsg=4612)
 
+            # バッファに内包されるデータの空間検索
             gdf_point_in_buffer = gdf_point_in_buffer[gdf_point_in_buffer.within(buffer_geom)]
 
             # dailyid別にラインを作成
@@ -164,8 +188,6 @@ if __name__ == '__main__':
                              stay_time])
                         path.append([lon_before, lat_before])
 
-
-
                     time_before = time
                     dist += distance_latlon(lon_before, lat_before, lon, lat)
                     lat_before = lat
@@ -176,18 +198,18 @@ if __name__ == '__main__':
                     linestring = LineString_shapely(path)
                     lines_out.append([station_id, station_name, did, trip_count,linestring, first_time, dist, stay_time])
 
+            # 一旦出力
+            df_points_out = pd.DataFrame(points_out, columns=["station_id", "station_name", "dailyid", "trip_count", "lat",
+                                                              "lon", "timestamp", "dist","stay_second"])
 
-        df_points_out = pd.DataFrame(points_out, columns=["station_id", "station_name", "dailyid", "trip_count", "lat",
-                                                          "lon", "timestamp", "dist","stay_second"])
+            path = f"{output_dir}/point_buffer_analyze/{file_day}_point_in_buffer.csv"
+            df_points_out.to_csv(path, index=False)
 
-        path = f"{output_dir}/point_buffer_analyze/{file_day}_point_in_buffer.csv"
-        df_points_out.to_csv(path, index=False)
+            df_lines_out = pd.DataFrame(lines_out, columns=["station_id", "station_name", "dailyid", "trip_count", "geometry",
+                                                              "first_timestamp", "dist", "stay_second"])
+            gdf_lines_out = gpd.GeoDataFrame(df_lines_out, geometry=df_lines_out["geometry"])
+            gdf_lines_out = gdf_lines_out.set_crs(epsg=4612)
 
-        df_lines_out = pd.DataFrame(lines_out, columns=["station_id", "station_name", "dailyid", "trip_count", "geometry",
-                                                          "first_timestamp", "dist", "stay_second"])
-        gdf_lines_out = gpd.GeoDataFrame(df_lines_out, geometry=df_lines_out["geometry"])
-        gdf_lines_out = gdf_lines_out.set_crs(epsg=4612)
-
-        path = f"{output_dir}/point_buffer_analyze/{file_day}_line_in_buffer.gpkg"
-        gdf_lines_out.to_file(path, layer="line_in_buffer", driver="GPKG")
+            path = f"{output_dir}/point_buffer_analyze/{file_day}_line_in_buffer.gpkg"
+            gdf_lines_out.to_file(path, layer="line_in_buffer", driver="GPKG")
 
